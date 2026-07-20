@@ -80,7 +80,7 @@ class AbstractPostgresHealthHanlder(AbstractComponentHealthHandler):
 
     def ping(self) -> None:
         try:
-            with psycopg2.connect(
+            with psycopg.connect(
                 database=self.database,
                 user=self.user,
                 password=self.password,
@@ -109,7 +109,7 @@ class PostgresHealthHandler(AbstractPostgresHealthHanlder):
 
     def check_write_read(self) -> None:
         try:
-            with psycopg2.connect(
+            with psycopg.connect(
                 database=self.database,
                 user=self.user,
                 password=self.password,
