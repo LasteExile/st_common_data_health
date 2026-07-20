@@ -1,12 +1,21 @@
 [project]
 name = "st-common-data-health"
-version = "0.1.0"
+version = "1.0.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "psycopg[binary]>=3.3.4",
+    "redis>=8.0.1",
+]
 
 
 [tool.uv]
 package = true
+
+[dependency-groups]
+dev = [
+    "ipython>=9.15.0",
+    "mypy>=2.3.0",
+]
 
