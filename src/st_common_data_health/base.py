@@ -1,6 +1,6 @@
 import time
 import datetime
-from typing import Literal, Callable, TypedDict
+from typing import Literal, Callable, TypedDict, Awaitable
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -54,15 +54,15 @@ class AbstractComponentHealthHandler(ABC):
             self.name = name
 
     @abstractmethod
-    def check_startup(self) -> None:
+    async def check_startup(self) -> None:
         pass
 
     @abstractmethod
-    def check_live(self) -> None:
+    async def check_live(self) -> None:
         pass
 
     @abstractmethod
-    def check_ready(self) -> None:
+    async def check_ready(self) -> None:
         pass
 
 
@@ -75,12 +75,21 @@ class HealthHandler:
         Every probe returns worst status and detailed components status
     """
         
-    components: list[AbstractComponentHealthHandler]
+    _components: dict[HealthTypesType, list[AbstractComponentHealthHandler]]
 
-    def __init__(self, components: list[AbstractComponentHealthHandler]):
-        self.components = components 
+    def __init__(
+        self,
+        live_components: list[AbstractComponentHealthHandler],
+        ready_components: list[AbstractComponentHealthHandler],
+        startup_components: list[AbstractComponentHealthHandler],
+    ) -> None:
+        self._components = {
+            "live": live_components,
+            "ready": ready_components, 
+            "startup": startup_components,
+        }
 
-    def _get_status(
+    async def _get_status(
         self,
         *,
         health_type: Literal["startup", "live", "ready"],
@@ -91,14 +100,14 @@ class HealthHandler:
         components_statuses: dict[str, ComponentHealthStatus] = {}
 
         total_check_start_time = time.time()
-        for component in self.components:
+        for component in self._components[health_type]:
             method = getattr(component, method_name)
             exception = None
             status = HEALTH_STATUS.HEALTHY
 
             check_start_time = time.time()
             try:
-                method()
+                await method()
             except UnhealthComponentError as e:
                 exception = str(e)
                 status = HEALTH_STATUS.UNHEALTHY
@@ -130,16 +139,17 @@ class HealthHandler:
             "entries": components_statuses,
         } 
 
-    def get_startup(self) -> TotalHealthStatus:
-        return self._get_status(health_type="startup")
+    async def get_startup(self) -> TotalHealthStatus:
+        return await self._get_status(health_type="startup")
 
-    def get_live(self) -> TotalHealthStatus:
-        return self._get_status(health_type="live")
+    async def get_live(self) -> TotalHealthStatus:
+        return await self._get_status(health_type="live")
 
-    def get_ready(self) -> TotalHealthStatus:
-        return self._get_status(health_type="ready")
+    async def get_ready(self) -> TotalHealthStatus:
+        return await self._get_status(health_type="ready")
 
-    def get_method_by_type(self, type_: HealthTypesType) -> Callable[[], TotalHealthStatus]:
+    def get_method_by_type(self, type_: HealthTypesType) -> Callable[[], Awaitable[TotalHealthStatus]]:
+
         TYPES = {
             "startup": self.get_startup,
             "live": self.get_live,

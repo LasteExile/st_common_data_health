@@ -1,165 +1,105 @@
 from __future__ import annotations
-import time
-from typing import TypedDict
-from urllib.parse import urlparse
 
-import psycopg
-from psycopg import Error as PsycopgError
+import asyncio
+import time
+
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from st_common_data_health.base import AbstractComponentHealthHandler
 from st_common_data_health.exceptions import UnhealthComponentError
 
 
-__all__ = ("PostgresHealthHandler", "ReadOnlyPostgresHealthHandler",)
 
-
-class ConnectionDictType(TypedDict):
-    USER: str 
-    PASSWORD: str
-    HOST: str
-    PORT: str
-    NAME: str
-
-
-class AbstractPostgresHealthHanlder(AbstractComponentHealthHandler):
+class AbstractPostgresHealthHandler(AbstractComponentHealthHandler):
     name = "postgres"
-
-    user: str
-    password: str
-    host: str
-    port: str
-    database: str
 
     def __init__(
         self,
-        *args,
-        user: str,
-        password: str,
-        port: str,
-        database: str,
-        host: str,
-        **kwargs,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        timeout: float = 3.0,
+        name: str | None = None,
     ) -> None:
-        super().__init__(*args, **kwargs)
-        self.user = user
-        self.password = password
-        self.port = port
-        self.database = database
-        self.host = host
+        super().__init__(name=name)
+        self._session_factory = session_factory
+        self._timeout = timeout
 
-    @classmethod
-    def from_url(
-        cls,
-        url: str,
-        name: str | None = None,
-    ) -> PostgresHealthHandler:
-        result = urlparse(url)
-        return cls(
-            user=result.username,  # type: ignore
-            password=result.password,  # type: ignore
-            host=result.hostname,  # type: ignore
-            port=result.port,  # type: ignore
-            database=result.path[1:],  # type: ignore
-            name=name,
-        )
-
-    @classmethod
-    def from_connection_dict(
-        cls,
-        connection_dict: ConnectionDictType,
-        name: str | None = None,
-    ) -> PostgresHealthHandler:
-        return cls(
-            user=connection_dict["USER"],
-            password=connection_dict["PASSWORD"],
-            host=connection_dict["HOST"],
-            port=connection_dict["PORT"],
-            dbname=connection_dict["NAME"],
-            name=name,
-        )
-
-    def ping(self) -> None:
+    async def ping(self) -> None:
         try:
-            with psycopg.connect(
-                dbname=self.database,
-                user=self.user,
-                password=self.password,
-                port=self.port,
-                host=self.host,
-            ) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-                    cur.fetchone()
-        except PsycopgError as e:
-            raise UnhealthComponentError(e)
+            async with asyncio.timeout(self._timeout):
+                async with self._session_factory() as session:
+                    await session.execute(text("SELECT 1"))
+        except (SQLAlchemyError, TimeoutError) as exc:
+            raise UnhealthComponentError(str(exc)) from exc
 
 
-class ReadOnlyPostgresHealthHandler(AbstractPostgresHealthHanlder):
-    def check_startup(self) -> None:
-        self.ping()
+class ReadOnlyPostgresHealthHandler(AbstractPostgresHealthHandler):
+    async def check_startup(self) -> None:
+        await self.ping()
 
-    def check_live(self) -> None:
-        self.ping()
+    async def check_live(self) -> None:
+        await self.ping()
 
-    def check_ready(self) -> None:
-        self.ping()
+    async def check_ready(self) -> None:
+        await self.ping()
 
 
-class PostgresHealthHandler(AbstractPostgresHealthHanlder):
-
-    def check_write_read(self) -> None:
+class PostgresHealthHandler(AbstractPostgresHealthHandler):
+    async def check_write_read(self) -> None:
         try:
-            with psycopg.connect(
-                dbname=self.database,
-                user=self.user,
-                password=self.password,
-                port=self.port,
-                host=self.host,
-            ) as conn:
-                conn.autocommit = False
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        CREATE TEMP TABLE IF NOT EXISTS healthcheck_tmp (
-                            id         SERIAL,
-                            created_at TIMESTAMPTZ DEFAULT NOW(),
-                            val        TEXT
-                        ) ON COMMIT DROP
-                    """)
-
-                    value = f"health-{int(time.time())}"
-                    cur.execute(
-                        "INSERT INTO healthcheck_tmp (val) VALUES (%s)",
-                        (value,),
-                    )
-
-                    cur.execute(
-                        "SELECT val FROM healthcheck_tmp "
-                        "ORDER BY id DESC LIMIT 1"
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        raise UnhealthComponentError(
-                            "Can't read back healthcheck row from DB"
+            async with asyncio.timeout(self._timeout):
+                async with self._session_factory() as session:
+                    try:
+                        await session.execute(
+                            text("""
+                                CREATE TEMP TABLE healthcheck_tmp (
+                                    id BIGSERIAL,
+                                    val TEXT NOT NULL
+                                ) ON COMMIT DROP
+                            """)
                         )
 
-                    (result_val,) = row
-                    if result_val != value:
-                        raise UnhealthComponentError(
-                            "Healthcheck value mismatch when reading from DB"
+                        expected = f"health-{time.time_ns()}"
+
+                        await session.execute(
+                            text("""
+                                INSERT INTO healthcheck_tmp (val)
+                                VALUES (:value)
+                            """),
+                            {"value": expected},
                         )
 
-                conn.rollback()
-        except PsycopgError as e:
-            conn.rollback()
-            raise UnhealthComponentError(e)
+                        actual = await session.scalar(
+                            text("""
+                                SELECT val
+                                FROM healthcheck_tmp
+                                ORDER BY id DESC
+                                LIMIT 1
+                            """)
+                        )
 
-    def check_startup(self) -> None:
-        self.ping()
+                        if actual != expected:
+                            raise UnhealthComponentError(
+                                "PostgreSQL healthcheck value mismatch"
+                            )
+                    finally:
+                        await session.rollback()
 
-    def check_live(self) -> None:
-        self.ping()
-        self.check_write_read()
+        except UnhealthComponentError:
+            raise
+        except (SQLAlchemyError, TimeoutError) as exc:
+            raise UnhealthComponentError(str(exc)) from exc
+        
 
-    def check_ready(self) -> None:
-        self.ping()
-        self.check_write_read()
+    async def check_startup(self) -> None:
+        await self.ping()
+
+    async def check_live(self) -> None:
+        await self.ping()
+        await self.check_write_read()
+
+    async def check_ready(self) -> None:
+        await self.ping()
+        await self.check_write_read()
