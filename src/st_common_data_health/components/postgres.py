@@ -95,11 +95,10 @@ class PostgresHealthHandler(AbstractPostgresHealthHandler):
 
     async def check_startup(self) -> None:
         await self.ping()
+        await self.check_write_read()
 
     async def check_live(self) -> None:
         await self.ping()
-        await self.check_write_read()
 
     async def check_ready(self) -> None:
         await self.ping()
-        await self.check_write_read()
