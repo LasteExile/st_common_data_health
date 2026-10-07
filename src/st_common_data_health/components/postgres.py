@@ -31,8 +31,14 @@ class AbstractPostgresHealthHandler(AbstractComponentHealthHandler):
             async with asyncio.timeout(self._timeout):
                 async with self._session_factory() as session:
                     await session.execute(text("SELECT 1"))
-        except (SQLAlchemyError, TimeoutError) as exc:
-            raise UnhealthComponentError(str(exc)) from exc
+        except SQLAlchemyError as exc:
+            raise UnhealthComponentError(
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        except TimeoutError as exc:
+            raise UnhealthComponentError(
+                f"Postgres healthcheck timed out after {self._timeout}s"
+            ) from exc
 
 
 class ReadOnlyPostgresHealthHandler(AbstractPostgresHealthHandler):

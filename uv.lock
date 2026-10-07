@@ -663,7 +663,7 @@ asyncio = [
 
 [[package]]
 name = "st-common-data-health"
-version = "1.0.2"
+version = "1.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "faststream", extra = ["kafka"] },
